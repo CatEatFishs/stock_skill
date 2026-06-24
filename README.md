@@ -1,6 +1,6 @@
 # stock_skill
 
-A 股数据查询 Skill 集合。
+股票 · A 股数据查询 Skill 集合。
 
 ## Skills
 
