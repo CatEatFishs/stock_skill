@@ -12,6 +12,21 @@ def add_ma(df: pd.DataFrame, periods: list[int]) -> pd.DataFrame:
     return out
 
 
+def add_macd(
+    df: pd.DataFrame,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> pd.DataFrame:
+    out = df.copy()
+    ema_fast = out["close"].ewm(span=fast, adjust=False).mean()
+    ema_slow = out["close"].ewm(span=slow, adjust=False).mean()
+    out["macd_dif"] = ema_fast - ema_slow
+    out["macd_dea"] = out["macd_dif"].ewm(span=signal, adjust=False).mean()
+    out["macd_hist"] = 2 * (out["macd_dif"] - out["macd_dea"])
+    return out
+
+
 def add_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     out = df.copy()
     delta = out["close"].diff()

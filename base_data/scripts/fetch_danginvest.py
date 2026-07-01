@@ -54,6 +54,9 @@ SORT_ALIASES = {
     "change_desc": "change_desc",
     "涨幅": "change_desc",
     "领涨": "change_desc",
+    "change_week_desc": "change_week_desc",
+    "周涨幅": "change_week_desc",
+    "近一周涨幅": "change_week_desc",
     "change_asc": "change_asc",
     "跌幅": "change_asc",
     "领跌": "change_asc",
@@ -297,6 +300,34 @@ def cmd_detail(
         items_meta = data.get("itemsMeta") or {}
         total = items_meta.get("total", len(items))
         print(f"  ... 已截断显示前 {display_n} 只（本页 {len(items)} 只，总计 {total} 只）")
+
+
+def fetch_boards_summary_items(
+    mode: str,
+    limit: int = 10,
+    sort: str = "change_desc",
+    retries: int = 2,
+) -> tuple[list[dict], dict]:
+    """Fetch board summary items for programmatic use (no stdout)."""
+    api_mode = normalize_mode(mode)
+    api_sort = normalize_sort(sort, for_detail=False)
+    payload = _get_json(
+        BOARDS_SUMMARY_URL,
+        {"mode": api_mode, "limit": int(limit), "sort": api_sort},
+        retries=retries,
+    )
+    data = payload.get("data") or {}
+    items = list(data.get("items") or [])
+    meta = {
+        "mode": api_mode,
+        "limit": int(limit),
+        "sort": api_sort,
+        "tradeDate": payload.get("tradeDate"),
+        "count": data.get("count"),
+        "total": data.get("total"),
+        "data_source": "DangInvest",
+    }
+    return items, meta
 
 
 def main() -> None:

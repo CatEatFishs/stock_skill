@@ -6,7 +6,7 @@ from typing import Callable
 
 import pandas as pd
 
-from .indicators import add_atr, add_breakout_levels, add_ma, add_rsi
+from .indicators import add_atr, add_breakout_levels, add_ma, add_macd, add_rsi
 
 
 def _trend_pullback_rsi_bounds(out: pd.DataFrame, fast: int, slow: int, params: dict) -> tuple[pd.Series, pd.Series]:
@@ -37,17 +37,29 @@ def trend_pullback(df: pd.DataFrame, params: dict) -> pd.DataFrame:
     fast = int(params.get("fast", 10))
     slow = int(params.get("slow", 30))
     rsi_period = int(params.get("rsi_period", 14))
-    out = add_rsi(add_ma(df, [fast, slow]), rsi_period)
+    macd_fast = int(params.get("macd_fast", 12))
+    macd_slow = int(params.get("macd_slow", 26))
+    macd_signal = int(params.get("macd_signal", 9))
+    out = add_macd(
+        add_rsi(add_ma(df, [fast, slow]), rsi_period),
+        macd_fast,
+        macd_slow,
+        macd_signal,
+    )
     rsi_key = f"rsi_{rsi_period}"
     rsi_low, rsi_high = _trend_pullback_rsi_bounds(out, fast, slow, params)
+    macd_golden = out["macd_dif"] > out["macd_dea"]
+    macd_hist_expanding = out["macd_hist"] > out["macd_hist"].shift(1)
     out["entry"] = (
         (out[f"ma_{fast}"] > out[f"ma_{slow}"])
         & (out["close"] > out[f"ma_{slow}"])
         & (out["close"] < out[f"ma_{fast}"] * float(params.get("pullback_ceiling", 1.01)))
         & (out[rsi_key] >= rsi_low)
         & (out[rsi_key] <= rsi_high)
+        & macd_golden
+        & macd_hist_expanding
     )
-    out["exit"] = (out["close"] < out[f"ma_{slow}"]) | (out[rsi_key] > float(params.get("exit_rsi", 72)))
+    out["exit"] = out["close"] < out[f"ma_{slow}"]
     out["score"] = ((out[f"ma_{fast}"] / out[f"ma_{slow}"]) - 1.0).fillna(0.0)
     return out
 

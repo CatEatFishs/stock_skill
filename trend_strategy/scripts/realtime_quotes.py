@@ -16,7 +16,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from paper_trading.market_data import MarketDataProvider
+from simulated_trading_path import ensure_simulated_trading_on_path
+
+ensure_simulated_trading_on_path()
+from simulated_trading.market_data import MarketDataProvider
 
 
 def _normalize_code_token(raw: str) -> str | None:

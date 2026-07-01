@@ -41,7 +41,8 @@
 |------|----------|---------|
 | `market_cap_desc` / `总市值` | `market_cap_desc` | 总市值 |
 | `turnover_desc` / `成交额` / `总成交额` | `turnover_desc` | 总成交额 |
-| `change_desc` / `涨幅` / `领涨` | `change_desc` | 涨幅 |
+| `change_desc` / `涨幅` / `领涨` | `change_desc` | 当日涨幅 |
+| `change_week_desc` / `周涨幅` / `近一周涨幅` | `change_week_desc` | 近一周涨幅 |
 | `change_asc` / `跌幅` / `领跌` | `change_asc` | 跌幅 |
 
 默认 `--sort change_desc`（涨幅/领涨）。
