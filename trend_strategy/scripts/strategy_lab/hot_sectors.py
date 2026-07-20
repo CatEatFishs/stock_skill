@@ -41,7 +41,7 @@ def load_hot_sector_snapshot(
     top_n: int = 10,
     sort: str = "change_week_desc",
     *,
-    match_pool_n: int = 30,
+    match_pool_n: int = 50,
     include_sub_industry: bool = True,
     include_concept: bool = True,
 ) -> dict[str, Any]:
@@ -55,7 +55,7 @@ def load_hot_sector_snapshot(
         "sort": sort,
         "lookback": "1w",
         "lookback_label": "近一周涨幅",
-        "match_mode": "industry_and_concept_in_pool",
+        "match_mode": "industry_or_concept_in_pool",
         "trade_date": None,
         "industry_top": [],
         "concept_top": [],
@@ -153,7 +153,7 @@ def evaluate_hot_sector_match(
                 break
 
     matched_concepts = list(dict.fromkeys(matched_concepts))
-    matched = bool(matched_industry and matched_concepts)
+    matched = bool(matched_industry or matched_concepts)
 
     sector_ref_change_pct: float | None = None
     refs = [x for x in [matched_industry_change_pct, *matched_concept_changes] if x is not None]
@@ -162,7 +162,7 @@ def evaluate_hot_sector_match(
 
     return {
         "hot_sector_matched": matched,
-        "hot_sector_match_mode": "industry_and_concept_in_pool",
+        "hot_sector_match_mode": "industry_or_concept_in_pool",
         "stock_industry": industry,
         "stock_concepts": concepts,
         "matched_hot_industry": matched_industry,
@@ -170,6 +170,55 @@ def evaluate_hot_sector_match(
         "matched_hot_concepts": matched_concepts,
         "matched_hot_concept_change_pcts": matched_concept_changes,
         "sector_ref_change_pct": sector_ref_change_pct,
+    }
+
+
+def evaluate_style_filter(
+    stock_sector: dict[str, Any] | None,
+    *,
+    industry_blacklist: list[str] | None = None,
+    min_concepts: int = 0,
+) -> dict[str, Any]:
+    """Style gate: drop blacklisted industries and require a minimum concept-tag count.
+
+    行业命中黑名单（含包含匹配）→ 剔除。
+    行业缺失时 fail-close：概念标签命中黑名单关键词也剔除（防 push2 接口抖动漏拦）。
+    个股概念标签数不足 min_concepts → 剔除（过滤无题材蓝筹）。
+    """
+    industry = (stock_sector or {}).get("industry")
+    concepts = [c for c in list((stock_sector or {}).get("concepts") or []) if str(c).strip()]
+    blacklist = industry_blacklist or []
+
+    blacklisted: str | None = None
+    blacklist_source: str | None = None
+    for bad in blacklist:
+        if industry and _labels_match(industry, bad):
+            blacklisted = bad
+            blacklist_source = "industry"
+            break
+        for concept in concepts:
+            if _labels_match(concept, bad):
+                blacklisted = bad
+                blacklist_source = "concept"
+                break
+        if blacklisted:
+            break
+
+    concept_ok = len(concepts) >= int(min_concepts)
+
+    passed = blacklisted is None and concept_ok
+    reason: str | None = None
+    if blacklisted is not None:
+        reason = f"{blacklist_source}_blacklisted:{blacklisted}"
+    elif not concept_ok:
+        reason = f"too_few_concepts:{len(concepts)}<{int(min_concepts)}"
+
+    return {
+        "style_filter_passed": passed,
+        "style_reject_reason": reason,
+        "stock_industry": industry,
+        "stock_concept_count": len(concepts),
+        "blacklist_hit_source": blacklist_source,
     }
 
 

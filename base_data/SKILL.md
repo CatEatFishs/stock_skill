@@ -17,7 +17,7 @@ description: 查询A股实时行情、历史数据、技术指标、事件、资
 - A+H 双重上市公司列表（支持按 H 股上市日期筛选）
 - A股赴港上市关键事件时间节点（递表/聆讯/备案/招股/定价/配售/上市）
 - 热门行业、热门概念、行业/概念涨跌幅、板块热力图、板块成分股、7×24 市场快讯（`fetch_danginvest.py`；**先读** `references/danginvest-api-reference.md`）
-- 个股行业信息（`fetch_sector_info.py`，数据源东方财富；**个股概念**不稳定，见下）
+- 个股行业与题材概念信息（`fetch_sector_info.py`，数据源东方财富 F10 核心题材）
 
 ## 环境与路径
 
@@ -37,7 +37,7 @@ python3 "$SKILL_DIR/scripts/fetch_danginvest.py" [参数]
 python3 "$SKILL_DIR/scripts/fetch_sector_info.py" [参数]
 ```
 
-说明：`fetch_sector_info.py` 虽可能带概念参数，但东方财富**个股概念**接口不稳定、常为空，使用时固定加 `--no-concepts`，只查行业与证券简称。**市场级概念板块**（涨跌幅、热力图、成分股）走 `fetch_danginvest.py`，不要与前者混用。
+说明：`fetch_sector_info.py` 默认返回个股**行业 + 题材概念**（概念取自东方财富 F10「核心题材」的所属板块，已过滤行业/地域/指数成分/风格噪声）；只需行业时可加 `--no-concepts` 省一次请求。**市场级概念板块**（涨跌幅、热力图、成分股）走 `fetch_danginvest.py`，不要与前者混用。
 
 ## 代码格式约定
 
@@ -56,7 +56,7 @@ python3 "$SKILL_DIR/scripts/fetch_sector_info.py" [参数]
 - `fetch_stock_events.py`：业绩、增减持/回购、监管、重大合同、舆情方向
 - `fetch_ah_stocks.py`：A+H 双重上市公司清单、H 股上市日期区间筛选
 - `fetch_ah_ipo_timeline.py`：A股赴港上市关键事件节点（递表/聆讯/备案/招股/定价/配售/上市）；支持 `--code` / `--name` 点查
-- `fetch_sector_info.py`：单只或多只股票的行业与名称（东方财富）；批量时并行，默认 `--workers`；**仅文档化行业路径，不加概念**
+- `fetch_sector_info.py`：单只或多只股票的行业、名称与题材概念（东方财富 F10）；批量时并行，默认 `--workers`；只需行业时加 `--no-concepts`
 
 ## 执行流程
 
@@ -136,9 +136,11 @@ python3 fetch_ah_ipo_timeline.py --since 2020 --workers 4 --json
 
 # 热门行业/热门概念/涨跌幅/快讯 → fetch_danginvest.py，见 references/danginvest-api-reference.md
 
-# 个股行业（不加概念，见上文说明）
+# 个股行业 + 题材概念（默认含概念）
+python3 fetch_sector_info.py --json 600519
+python3 fetch_sector_info.py --workers 8 --timeout 15 --json 600519 000001 300750 600036 601318 002594 688981 300059
+# 只需行业+名称时省一次请求
 python3 fetch_sector_info.py --no-concepts --json 600519
-python3 fetch_sector_info.py --workers 8 --no-concepts --timeout 15 --json 600519 000001 300750 600036 601318 002594 688981 300059
 ```
 
 ## 不要做的事
@@ -147,7 +149,7 @@ python3 fetch_sector_info.py --workers 8 --no-concepts --timeout 15 --json 60051
 - 不在无必要时输出超长原始表格。
 - 不使用已移除的旧流程文案。
 - 热门概念、热门行业、行业/概念涨跌幅、板块热力图、板块成分、市场快讯：用 `fetch_danginvest.py`，**先读** `references/danginvest-api-reference.md`；勿用 `fetch_realtime.py --boards-*`。
-- 不承诺 `fetch_sector_info.py` 的个股概念字段；市场级「热门概念/概念涨跌」走 `fetch_danginvest.py`，不是 sector_info。
+- `fetch_sector_info.py` 的 `concepts` 是**个股所属题材概念**；市场级「热门概念/概念涨跌」走 `fetch_danginvest.py`，不是 sector_info。
 
 ## 参考
 

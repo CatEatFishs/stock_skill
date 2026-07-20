@@ -50,17 +50,19 @@ def trend_pullback(df: pd.DataFrame, params: dict) -> pd.DataFrame:
     rsi_low, rsi_high = _trend_pullback_rsi_bounds(out, fast, slow, params)
     macd_golden = out["macd_dif"] > out["macd_dea"]
     macd_hist_expanding = out["macd_hist"] > out["macd_hist"].shift(1)
+    macd_momentum = macd_golden & macd_hist_expanding
+    out["macd_momentum"] = macd_momentum
     out["entry"] = (
         (out[f"ma_{fast}"] > out[f"ma_{slow}"])
         & (out["close"] > out[f"ma_{slow}"])
         & (out["close"] < out[f"ma_{fast}"] * float(params.get("pullback_ceiling", 1.01)))
         & (out[rsi_key] >= rsi_low)
         & (out[rsi_key] <= rsi_high)
-        & macd_golden
-        & macd_hist_expanding
     )
     out["exit"] = out["close"] < out[f"ma_{slow}"]
-    out["score"] = ((out[f"ma_{fast}"] / out[f"ma_{slow}"]) - 1.0).fillna(0.0)
+    base_score = ((out[f"ma_{fast}"] / out[f"ma_{slow}"]) - 1.0).fillna(0.0)
+    macd_bonus = float(params.get("macd_momentum_score_bonus", 0.003))
+    out["score"] = base_score + macd_momentum.astype(float) * macd_bonus
     return out
 
 

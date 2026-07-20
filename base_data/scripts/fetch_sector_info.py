@@ -18,6 +18,8 @@
   python3 fetch_sector_info.py --batch-test
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -65,6 +67,106 @@ def _get_shared_session() -> requests.Session:
     return _SHARED_SESSION
 
 
+# 东财 F10「所属板块」(ssbk) 里混入了行业/地域/指数成分/规模风格等非概念板块，
+# 用关键词过滤掉这些噪声，仅保留真正的题材概念。
+_CONCEPT_EXCLUDE_KEYWORDS = (
+    "风格", "板块",  # 地域/风格：江苏板块、科技风格
+    "大盘", "中盘", "小盘", "权重股", "龙头", "价值", "成长",
+    "破净", "红利", "百元股", "昨日", "涨停", "连板", "振幅", "周期股",
+    "MSCI", "标准普尔", "富时", "证金", "汇金", "沪股通", "深股通",
+    "融资融券", "基金重仓", "回购", "增持",
+    "深证", "上证", "深成", "中证", "央视", "科创", "创业板综", "创业成份",
+    "茅指数", "宁组合", "热股",
+    # 属性类（非题材）：题材股/趋势股/机构重仓/QFII重仓/AH股 等
+    "题材股", "趋势股", "重仓", "AH股", "QFII", "预增", "预亏",
+    # 地域类
+    "长江三角", "西部大开发", "京津冀", "雄安", "大湾区", "自贸", "海西",
+)
+
+
+def _is_concept_board(name: str, own_industry: str | None) -> bool:
+    """判断板块名是否为真正的题材概念（排除行业/地域/指数/风格噪声）。"""
+    if not name:
+        return False
+    n = str(name).strip()
+    if not n:
+        return False
+    # 申万行业板块通常以 Ⅱ/Ⅲ 结尾
+    if n.endswith(("Ⅱ", "Ⅲ", "Ⅰ")):
+        return False
+    # 指数成分常以下划线结尾，如 HS300_ / 上证50_
+    if n.endswith("_") or n.endswith("R"):
+        return False
+    # 个股自身所属行业
+    if own_industry and (n == str(own_industry).strip()):
+        return False
+    for kw in _CONCEPT_EXCLUDE_KEYWORDS:
+        if kw in n:
+            return False
+    return True
+
+
+def _f10_code(code6: str, market: str | None) -> str:
+    """转成东财 F10 代码格式，如 SZ002384 / SH600519。"""
+    prefix = "SH" if str(market) == "1" else "SZ"
+    return f"{prefix}{code6}"
+
+
+def _industry_from_ssbk(ssbk: list) -> str | None:
+    """从 F10 ssbk 提取所属行业：优先 BOARD_RANK=1，否则取首条非地域板块。"""
+    if not ssbk:
+        return None
+    ranked = sorted(
+        (x for x in ssbk if isinstance(x, dict) and x.get("BOARD_NAME")),
+        key=lambda x: int(x.get("BOARD_RANK") or 999),
+    )
+    for item in ranked:
+        name = str(item.get("BOARD_NAME") or "").strip()
+        if not name:
+            continue
+        # 地域板块如「江苏板块」不作为行业
+        if name.endswith("板块") and len(name) <= 6:
+            continue
+        return name
+    return None
+
+
+def _fetch_f10_core(
+    session,
+    code6: str,
+    market: str,
+    *,
+    timeout: int,
+    retries: int,
+) -> dict:
+    """拉取 F10 核心题材：名称、ssbk 所属板块列表。"""
+    out: dict = {"name": None, "industry": None, "ssbk": [], "error": None}
+    for attempt in range(retries + 1):
+        try:
+            url = "https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax"
+            resp = session.get(
+                url,
+                params={"code": _f10_code(code6, market)},
+                timeout=timeout,
+                headers={"Referer": "https://emweb.securities.eastmoney.com/"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            ssbk = data.get("ssbk") or []
+            out["ssbk"] = ssbk
+            if ssbk:
+                first = ssbk[0]
+                if isinstance(first, dict):
+                    out["name"] = (first.get("SECURITY_NAME_ABBR") or "").strip() or None
+            out["industry"] = _industry_from_ssbk(ssbk)
+            break
+        except Exception as exc:
+            out["error"] = str(exc)
+            if attempt < retries:
+                time.sleep(0.1 * (attempt + 1))
+    return out
+
+
 def normalize_code(code: str) -> tuple:
     """标准化股票代码，返回 (市场代码, 纯代码)"""
     code = code.strip()
@@ -103,7 +205,8 @@ def get_sector_info_http(code6: str, market: str, timeout: int = 8, include_conc
     session = _get_shared_session()
     secid = f"{market}.{code6}"
     
-    # 接口1：个股基本信息（名称 + 行业）
+    # 接口1：个股基本信息（名称 + 行业），push2 不稳定时由 F10 兜底
+    push2_ok = False
     for attempt in range(retries + 1):
         try:
             url = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -115,42 +218,39 @@ def get_sector_info_http(code6: str, market: str, timeout: int = 8, include_conc
             resp = session.get(url, params=params, timeout=timeout)
             resp.raise_for_status()
             data = resp.json()
-            
+
             if data.get("data"):
-                result["name"] = data["data"].get("f58")
-                result["industry"] = data["data"].get("f127")
+                result["name"] = data["data"].get("f58") or result["name"]
+                result["industry"] = data["data"].get("f127") or result["industry"]
                 if result["name"] or result["industry"]:
+                    push2_ok = True
                     break
         except Exception as e:
             result["error"] = str(e)
             if attempt < retries:
                 time.sleep(0.2 * (attempt + 1))
-    
-    # 接口2：获取概念板块（可选）
-    if include_concepts:
-        for attempt in range(retries + 1):
-            try:
-                url2 = "https://push2.eastmoney.com/api/qt/slist/get"
-                params2 = {
-                    "secid": secid,
-                    "fields": "f12,f14",
-                    "spt": "3",
-                    "ut": "fa5fd1943c7b386f172d6893dbfba10b",
-                }
-                resp2 = session.get(url2, params=params2, timeout=timeout)
-                resp2.raise_for_status()
-                data2 = resp2.json()
-                
-                if data2.get("data") and data2["data"].get("diff"):
-                    for item in data2["data"]["diff"]:
-                        name = item.get("f14", "")
-                        if name and name not in result["concepts"]:
-                            result["concepts"].append(name)
-                break
-            except Exception:
-                if attempt < retries:
-                    time.sleep(0.1 * (attempt + 1))
-    
+
+    need_f10 = include_concepts or not push2_ok or not result["name"] or not result["industry"]
+    f10: dict | None = None
+    if need_f10:
+        f10 = _fetch_f10_core(session, code6, market, timeout=timeout, retries=retries)
+        if not result["name"] and f10.get("name"):
+            result["name"] = f10["name"]
+        if not result["industry"] and f10.get("industry"):
+            result["industry"] = f10["industry"]
+        if f10.get("error") and not push2_ok:
+            result["error"] = f10["error"]
+
+    # 概念板块：来自 F10 ssbk，过滤行业/地域/指数/风格噪声
+    if include_concepts and f10:
+        for item in f10.get("ssbk") or []:
+            name = (item.get("BOARD_NAME") or "").strip()
+            if _is_concept_board(name, result.get("industry")) and name not in result["concepts"]:
+                result["concepts"].append(name)
+
+    if f10 and (result["industry"] or result["name"]):
+        result["source"] = "eastmoney+f10" if not push2_ok else "eastmoney"
+
     return result
 
 

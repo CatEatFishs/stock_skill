@@ -1,4 +1,4 @@
-"""Market regime gate: index trend + RSI floor before allowing new buy signals."""
+"""Market regime gate: index RSI floor before allowing new buy signals."""
 
 from __future__ import annotations
 
@@ -54,8 +54,8 @@ def evaluate_market_regime(
 ) -> dict[str, Any]:
     """Return regime snapshot for buy gating.
 
-    allow_new_buys when every configured index is above ma_period MA
-    and no index RSI is below rsi_floor on the evaluation bar.
+    allow_new_buys when no configured index RSI is below rsi_floor on the evaluation bar.
+    Index MA (e.g. ma_20) is reported in indices.*.above_ma for reference only, not gating.
     """
     indices: dict[str, Any] = {}
     errors: list[str] = []
@@ -82,13 +82,10 @@ def evaluate_market_regime(
             indices[name] = {"code": code, "error": str(exc)[:200]}
 
     valid = [v for v in indices.values() if "error" not in v]
-    all_above_ma = bool(valid) and all(bool(v.get("above_ma")) for v in valid)
     all_rsi_ok = bool(valid) and all(bool(v.get("rsi_ok")) for v in valid)
-    allow_new_buys = all_above_ma and all_rsi_ok and not errors
+    allow_new_buys = all_rsi_ok and not errors
 
     block_reasons: list[str] = []
-    if not all_above_ma:
-        block_reasons.append("index_below_ma20")
     if not all_rsi_ok:
         block_reasons.append("index_rsi_below_floor")
     if errors:

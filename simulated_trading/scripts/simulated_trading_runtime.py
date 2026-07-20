@@ -7,17 +7,16 @@ import os
 from pathlib import Path
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 18765
-APP_NAME = "simulated_trading"
-LEGACY_APP_NAME = "a-share-paper-trading"
-DB_FILENAME = "paper_trading.db"
+DEFAULT_PORT = 18767
+APP_NAME = "stock_skill_simulated_trading"
+DB_FILENAME = "stock_skill_paper_trading.db"
 LOG_FILENAME = "service.log"
 PID_FILENAME = "service.pid"
-LAUNCH_AGENT_LABEL = "ai.openclaw.simulated-trading"
+LAUNCH_AGENT_LABEL = "ai.openclaw.stock-skill-simulated-trading"
 
 
 def get_app_data_dir() -> Path:
-    custom = os.environ.get("SIMULATED_TRADING_HOME") or os.environ.get("A_SHARE_PAPER_TRADING_HOME")
+    custom = os.environ.get("STOCK_SKILL_SIMULATED_TRADING_HOME") or os.environ.get("SIMULATED_TRADING_HOME")
     if custom:
         return Path(custom).expanduser()
     home = Path.home()
@@ -26,11 +25,7 @@ def get_app_data_dir() -> Path:
     else:
         xdg = os.environ.get("XDG_DATA_HOME")
         base = Path(xdg).expanduser() if xdg else home / ".local" / "share"
-    new_dir = base / APP_NAME
-    legacy_dir = base / LEGACY_APP_NAME
-    if new_dir.exists() or not legacy_dir.exists():
-        return new_dir
-    return legacy_dir
+    return base / APP_NAME
 
 
 def get_default_db_path() -> Path:

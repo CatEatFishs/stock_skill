@@ -20,21 +20,23 @@ description: A股模拟盘交易与回测技能。Use when 用户要启动模拟
 
 ```bash
 SKILL_DIR="<本skill绝对路径>"
-python3 "$SKILL_DIR/scripts/simulated_trading_service.py" --host 127.0.0.1 --port 18765
+python3 "$SKILL_DIR/scripts/simulated_trading_service.py" --host 127.0.0.1 --port 18767
 ```
 
-默认监听 `http://127.0.0.1:18765`，默认数据库不再落在 skill 目录，而是落到用户级数据目录：
+默认监听 `http://127.0.0.1:18767`，默认数据库不再落在 skill 目录，而是落到用户级数据目录：
 
-- macOS: `~/Library/Application Support/simulated_trading/paper_trading.db`
-- Linux: `${XDG_DATA_HOME:-~/.local/share}/simulated_trading/paper_trading.db`
+- macOS: `~/Library/Application Support/stock_skill_simulated_trading/stock_skill_paper_trading.db`
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/stock_skill_simulated_trading/stock_skill_paper_trading.db`
+
+本仓库不再自动沿用旧目录 `a-share-paper-trading`，以避免和 a-share-skill 的模拟盘共用账户库。
 
 若本机该端口**已有**模拟盘进程在跑，**不要**再启动第二个实例：会报 `Address already in use`，且多进程可能争用同一 SQLite 库文件。启动前可先检查端口是否在监听，例如：
 
 ```bash
-lsof -iTCP:18765 -sTCP:LISTEN
+lsof -iTCP:18767 -sTCP:LISTEN
 ```
 
-或向 `http://127.0.0.1:18765/accounts` 发 `GET`（CLI 默认 `--base-url` 与此一致）。已有服务时直接用 `simulated_trading_cli.py` 即可。
+或向 `http://127.0.0.1:18767/accounts` 发 `GET`（CLI 默认 `--base-url` 与此一致）。已有服务时直接用 `simulated_trading_cli.py` 即可。
 
 更推荐使用控制脚本常驻运行：
 
@@ -53,8 +55,18 @@ python3 "$SKILL_DIR/scripts/simulated_trading_ctl.py" install-launchd
 服务会：
 - 交易时段定时撮合挂单
 - 非交易时段停止撮合
-- 收盘后让当日未成单过期
+- 盘后固定价格交易结束后让当日未成单过期
 - 定时写账户净值快照
+
+## 交易时间口径
+
+自 2026-07-06 起，A 股盘后固定价格交易适用品种扩展至全部 A 股及 ETF。本模拟盘文档统一采用以下时间口径：
+
+- 普通竞价收盘价形成：`15:00`
+- 盘后固定价格交易：`15:05-15:30`
+- 模拟盘业务日结束 / 当日单过期：`15:30` 后
+
+若脚本或测试仍引用 `15:00` 作为订单过期边界，应视为待同步的旧口径；普通日线收盘价、策略日线信号仍以 `15:00` 收盘价为准。
 
 可用启动参数：
 
@@ -65,7 +77,7 @@ python3 "$SKILL_DIR/scripts/simulated_trading_ctl.py" install-launchd
 - `--valuation-interval`
 - `--idle-valuation-interval`
 
-默认端口与 CLI 基址已改为 `18765`，避免和常见本地开发服务冲突。
+默认端口与 CLI 基址已改为 `18767`，避免和 a-share-skill 的 `18766` 模拟盘服务冲突。
 
 ## CLI
 
@@ -172,7 +184,7 @@ python3 "$SKILL_DIR/scripts/simulated_trading_cli.py" backtest 600519 --strategy
 - 集合竞价与午休时段不做自动撮合
 - 行情时间戳不是当日时，视为陈旧行情，不执行市价成交
 - 费用模型包含最低佣金、卖出印花税、沪市过户费
-- 当日单收盘后过期
+- 当日单在盘后固定价格交易结束后过期（`15:30` 后）
 
 ## 结构
 

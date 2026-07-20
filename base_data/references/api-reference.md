@@ -199,25 +199,26 @@ CODE        股票代码（必填）
 
 ## fetch_sector_info.py 参数详解
 
-查询单只或多只股票的**证券简称与申万/东财行业分类**，数据源：**东方财富** HTTP 接口。
+查询单只或多只股票的**证券简称、申万/东财行业分类与题材概念**，数据源：**东方财富** HTTP 接口。
 
-本参考与 `SKILL.md` 对齐：**不将「概念板块」列为可用能力**（上游概念接口结果不稳定、实践中常为空）。文档与技能用法上请**始终加 `--no-concepts`**，只使用行业与名称维度。
+概念数据源已从下线的 `push2 slist` 接口迁移到 **F10「核心题材」的所属板块（`CoreConception/PageAjax` 的 `ssbk`）**，并在脚本内过滤掉行业/地域/指数成分/规模风格等噪声，仅保留真正的题材概念。`push2/stock/get` 不稳定时，**名称与行业由 F10 ssbk 兜底**（`BOARD_RANK=1` 等）。默认即返回 `concepts`；仅当只需行业+名称、想省一次 F10 请求时才加 `--no-concepts`。
 
 ### 用法
 
-- 单只：`python3 fetch_sector_info.py --no-concepts --json 600519`
-- 多只（空格或逗号分隔，内部线程池并行）：`python3 fetch_sector_info.py --workers 8 --no-concepts --timeout 15 --json 600519 000001 300750`
+- 单只：`python3 fetch_sector_info.py --json 600519`
+- 多只（空格或逗号分隔，内部线程池并行）：`python3 fetch_sector_info.py --workers 8 --timeout 15 --json 600519 000001 300750`
+- 仅行业+名称（跳过概念请求）：`python3 fetch_sector_info.py --no-concepts --json 600519`
 
 | 参数 | 说明 |
 |---|---|
 | `codes` | 位置参数，一只或多只代码，支持空格或逗号分隔 |
 | `--workers` | 并发线程数 |
 | `--timeout` | 单只股票请求超时（秒） |
-| `--no-concepts` | **技能侧必选**：跳过概念板块请求，仅行业+名称 |
+| `--no-concepts` | 可选：跳过概念板块请求，仅行业+名称，可省一次网络请求 |
 | `--json` | 输出 JSON（多只时通常带 `data` 与耗时等元信息，以脚本实际输出为准） |
 | `--batch-test` | 使用脚本内置列表做批量自检 |
 
-返回字段（行业路径）：`code` / `name` / `industry` / `source`（一般为 `eastmoney`）等；`concepts` 即使存在也不作为本技能承诺字段。
+返回字段：`code` / `name` / `industry` / `concepts`（题材概念列表）/ `source`（一般为 `eastmoney`）等。
 
 ---
 

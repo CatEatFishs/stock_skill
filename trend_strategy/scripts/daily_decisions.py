@@ -8,6 +8,7 @@ import itertools
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -26,6 +27,7 @@ from strategy_lab.hot_sectors import (
     batch_stock_sectors,
     evaluate_hot_sector_entry_fit,
     evaluate_hot_sector_match,
+    evaluate_style_filter,
     load_hot_sector_snapshot,
 )
 from strategy_lab.market_regime import evaluate_market_regime
@@ -74,6 +76,40 @@ def _merge_holdings(file_codes: list[str], paper_codes: list[str]) -> list[str]:
     return out
 
 
+def _holding_trading_days(df: pd.DataFrame, buy_date: str | None, current_time) -> int | None:
+    if not buy_date:
+        return None
+    try:
+        start = pd.to_datetime(buy_date).normalize()
+        end = pd.to_datetime(current_time).normalize()
+    except Exception:
+        return None
+    if end < start:
+        return None
+    dates = pd.to_datetime(df["time"], errors="coerce").dt.normalize()
+    return int(((dates >= start) & (dates <= end)).sum())
+
+
+def _peak_close_since(df: pd.DataFrame, buy_date: str | None, current_time) -> float | None:
+    if not buy_date:
+        return None
+    try:
+        start = pd.to_datetime(buy_date).normalize()
+        end = pd.to_datetime(current_time).normalize()
+    except Exception:
+        return None
+    if end < start or "close" not in df.columns:
+        return None
+    dates = pd.to_datetime(df["time"], errors="coerce").dt.normalize()
+    window = df[(dates >= start) & (dates <= end)]
+    if window.empty:
+        return None
+    peak = pd.to_numeric(window["close"], errors="coerce").max()
+    if pd.isna(peak):
+        return None
+    return float(peak)
+
+
 def _row_snapshot(enriched: pd.DataFrame, idx: int) -> dict | None:
     if idx < 0 or idx >= len(enriched):
         return None
@@ -88,6 +124,7 @@ def _row_snapshot(enriched: pd.DataFrame, idx: int) -> dict | None:
         "close": round(float(row["close"]), 4),
         "score": round(float(row["score"]), 6),
         "rsi": None if rsi_val is None else round(rsi_val, 4),
+        "macd_momentum": bool(row["macd_momentum"]) if "macd_momentum" in row.index and pd.notna(row["macd_momentum"]) else False,
         "entry": bool(row["entry"]),
         "exit": bool(row["exit"]),
     }
@@ -142,6 +179,109 @@ def _passes_cost_filter(signal_bar: dict, roundtrip_cost_bps: float) -> bool:
     return _edge_after_cost(signal_bar, roundtrip_cost_bps) > 0
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _rating_for_score(score: float) -> tuple[str, str, str]:
+    if score >= 80:
+        return "🔥 强买候选", "买入", "优先低吸"
+    if score >= 70:
+        return "🔥 买入候选", "买入", "回踩低吸"
+    if score >= 60:
+        return "👀 观察低吸", "观察", "等回踩确认"
+    if score >= 50:
+        return "📌 观察", "观察", "只看不追"
+    if score >= 40:
+        return "⚠️ 谨慎", "谨慎", "降低仓位或放弃"
+    return "🛑 回避", "回避", "不买"
+
+
+def _score_rsi(rsi: float | None) -> float:
+    if rsi is None:
+        return 0.0
+    low = float(strategy_params.TREND_PULLBACK_PARAMS.get("bull_rsi_low", 42))
+    high = float(strategy_params.TREND_PULLBACK_PARAMS.get("bull_rsi_high", 72))
+    if rsi < low or rsi > high:
+        return 0.0
+    midpoint = 58.0
+    half_range = max(midpoint - low, high - midpoint, 1.0)
+    return _clamp(1.0 - abs(float(rsi) - midpoint) / half_range, 0.0, 1.0)
+
+
+def _score_hot_sector(item: dict) -> float:
+    score = 0.0
+    if item.get("hot_sector_matched"):
+        score += 5.0
+    if item.get("hot_sector_entry_fit_passed"):
+        score += 5.0
+    if item.get("relative_to_sector_ok") or item.get("near_ma_fast"):
+        score += 5.0
+    return _clamp(score / 15.0, 0.0, 1.0)
+
+
+def _score_buy_item(item: dict, *, use_previous_day: bool) -> dict:
+    weights = strategy_params.SIGNAL_SCORE_WEIGHTS
+    signal_bar = item.get("signal_bar") or {}
+    asof_bar = item.get("asof_bar") or {}
+    raw_score = max(float(signal_bar.get("score") or 0.0), 0.0)
+    edge = max(float(item.get("edge_after_cost") or 0.0), 0.0)
+    consensus = max(float(item.get("entry_consensus_ratio") or 0.0), 0.0)
+
+    components = {
+        "trend": _clamp(raw_score / 0.20, 0.0, 1.0) * weights["trend"],
+        "rsi": _score_rsi(signal_bar.get("rsi")) * weights["rsi"],
+        "robustness": _clamp(consensus, 0.0, 1.0) * weights["robustness"],
+        "edge_after_cost": _clamp(edge / 0.12, 0.0, 1.0) * weights["edge_after_cost"],
+        "hot_sector": _score_hot_sector(item) * weights["hot_sector"],
+        "style": (1.0 if item.get("style_filter_passed", True) else 0.0) * weights["style"],
+        "market_regime": (1.0 if item.get("market_regime_passed", True) else 0.0) * weights["market_regime"],
+        "macd_momentum": (1.0 if signal_bar.get("macd_momentum") else 0.0) * weights["macd_momentum"],
+    }
+    total = sum(components.values())
+
+    risk_flags: list[str] = []
+    if item.get("already_held"):
+        risk_flags.append("已有持仓不加仓")
+        total = min(total, 49.0)
+    if not item.get("cost_filter_passed", True):
+        risk_flags.append("成本空间不足")
+        total = min(total, 49.0)
+    if not item.get("consensus_filter_passed", True):
+        risk_flags.append("鲁棒性不足")
+        total = min(total, 49.0)
+    if not item.get("style_filter_passed", True):
+        risk_flags.append(item.get("style_reject_reason") or "风格过滤未通过")
+        total = min(total, 39.0)
+    if not item.get("hot_sector_filter_passed", True):
+        risk_flags.append("热门板块过滤未通过")
+        total = min(total, 49.0)
+    if not item.get("market_regime_passed", True):
+        risk_flags.append("大盘环境暂停新开仓")
+        total = min(total, 49.0)
+    if use_previous_day and asof_bar:
+        if asof_bar.get("exit"):
+            risk_flags.append("今日已触发exit")
+            total = min(total, 29.0)
+        elif not asof_bar.get("entry"):
+            risk_flags.append("今日不再满足entry")
+            total = min(total, 59.0)
+
+    rating_label, long_term_action, short_term_action = _rating_for_score(total)
+    item["stock_skill_score"] = round(float(total), 1)
+    item["rating_label"] = rating_label
+    item["long_term_action"] = long_term_action
+    item["short_term_action"] = short_term_action
+    item["score_components"] = {k: round(float(v), 2) for k, v in components.items()}
+    item["risk_flags"] = risk_flags
+    return item
+
+
+def _score_buy_items(items: list[dict], *, use_previous_day: bool) -> None:
+    for item in items:
+        _score_buy_item(item, use_previous_day=use_previous_day)
+
+
 def _hot_sector_filter_active(hot_snapshot: dict, disabled: bool) -> bool:
     if disabled:
         return False
@@ -169,8 +309,14 @@ def _apply_hot_sector_to_buy_items(
             match_info,
             entry_params,
         )
+        style_info = evaluate_style_filter(
+            stock_sector,
+            industry_blacklist=strategy_params.INDUSTRY_BLACKLIST,
+            min_concepts=strategy_params.REQUIRE_MIN_STOCK_CONCEPTS,
+        )
         item.update(match_info)
         item.update(fit_info)
+        item.update(style_info)
         if filter_active:
             item["hot_sector_filter_passed"] = bool(match_info.get("hot_sector_matched")) and bool(
                 fit_info.get("hot_sector_entry_fit_passed")
@@ -207,6 +353,353 @@ def _scan_one(
         return code, df, out, None
     except Exception as exc:
         return code, None, None, str(exc)[:200]
+
+
+def _fmt_num(value, digits: int = 2, suffix: str = "") -> str:
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):.{digits}f}{suffix}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_pct(value) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):+.2f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_change_from_bars(item: dict) -> str:
+    signal_bar = item.get("signal_bar") or {}
+    asof_bar = item.get("asof_bar") or {}
+    sig_close = signal_bar.get("close")
+    asof_close = asof_bar.get("close")
+    if sig_close in (None, 0) or asof_close is None:
+        return "涨跌N/A"
+    try:
+        pct = (float(asof_close) / float(sig_close) - 1.0) * 100.0
+        return _fmt_pct(pct)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return "涨跌N/A"
+
+
+def _index_label(key: str) -> str:
+    return {
+        "hs300": "沪深300",
+        "zz1000": "中证1000",
+    }.get(key, key)
+
+
+def _format_regime_line(payload: dict) -> str:
+    regime = (payload.get("market_regime") or {}).get("from_last_close") or {}
+    indices = regime.get("indices") or {}
+    parts = []
+    for key in ("hs300", "zz1000"):
+        idx = indices.get(key)
+        if not idx:
+            continue
+        ma_state = "MA20上方" if idx.get("above_ma") else "MA20下方"
+        rsi_state = "RSI达标" if idx.get("rsi_ok") else "RSI偏弱"
+        parts.append(
+            f"{_index_label(key)}·{_fmt_num(idx.get('close'), 2, '点')}·RSI{_fmt_num(idx.get('rsi'), 1)}·{ma_state}/{rsi_state}"
+        )
+    allow = bool(regime.get("allow_new_buys"))
+    gate = "收盘新开仓：允许" if allow else "收盘新开仓：暂停"
+    if regime.get("block_reasons"):
+        gate += f"（{','.join(regime.get('block_reasons') or [])}）"
+    if not parts:
+        return f"**大盘** {gate}"
+    return f"**大盘** {'；'.join(parts)}。{gate}"
+
+
+def _format_hot_line(payload: dict) -> str:
+    hot = payload.get("hot_sectors") or {}
+    industries = hot.get("industry_top") or []
+    concepts = hot.get("concept_top") or []
+
+    def top_names(rows: list[dict], n: int = 3) -> str:
+        out = []
+        for row in rows[:n]:
+            name = row.get("groupLabel") or row.get("groupKey") or ""
+            pct = _fmt_pct(row.get("changePct"))
+            if name:
+                out.append(f"{name}{pct}")
+        return "、".join(out) if out else "N/A"
+
+    return f"**热点** 行业：{top_names(industries)}；概念：{top_names(concepts)}"
+
+
+def _format_regime_table(payload: dict) -> list[str]:
+    regime = (payload.get("market_regime") or {}).get("from_last_close") or {}
+    indices = regime.get("indices") or {}
+    floor = regime.get("rsi_floor", 40)
+    lines = [
+        "**大盘新开仓开关**",
+        "",
+        "| 指数 | RSI | 策略要求 | 结论 |",
+        "|---|---:|---:|---|",
+    ]
+    for key in ("hs300", "zz1000"):
+        idx = indices.get(key) or {}
+        rsi = _fmt_num(idx.get("rsi"), 2)
+        verdict = "✅ 达标" if idx.get("rsi_ok") else "❌ 不达标"
+        lines.append(f"| {_index_label(key)} | {rsi} | ≥ {_fmt_num(floor, 0)} | {verdict} |")
+    return lines
+
+
+def _quote_for_item(item: dict) -> dict:
+    quote = item.get("quote") or {}
+    if isinstance(quote, dict):
+        return quote
+    return {}
+
+
+def _primary_theme(item: dict) -> str:
+    industry = item.get("matched_hot_industry") or item.get("stock_industry")
+    concepts = item.get("matched_hot_concepts") or []
+    if industry:
+        return str(industry).replace("(A股)", "")
+    if concepts:
+        text = str(concepts[0])
+        return text.replace("概念", "")
+    return "形态"
+
+
+def _direction_for_item(item: dict) -> str:
+    quote = _quote_for_item(item)
+    pct = quote.get("change_pct")
+    theme = _primary_theme(item)
+    try:
+        pct_f = float(pct)
+    except (TypeError, ValueError):
+        pct_f = 0.0
+    if pct_f >= 7:
+        return f"{theme}，涨幅偏高不追"
+    if pct_f >= 3:
+        return f"{theme}观察，不追"
+    if item.get("short_term_action") in {"优先低吸", "回踩低吸", "等回踩确认"}:
+        return str(item.get("short_term_action"))
+    return f"{theme}观察"
+
+
+def _attach_realtime_quotes(items: list[dict], provider: MarketDataProvider | None) -> None:
+    if not items or provider is None:
+        return
+    codes: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        code = _normalize_code(item.get("code", ""))
+        if code and code not in seen:
+            seen.add(code)
+            codes.append(code)
+
+    quotes: dict[str, dict] = {}
+
+    def fetch(code: str) -> tuple[str, dict]:
+        q = provider.get_quote(code)
+        return code, asdict(q)
+
+    workers = min(8, max(1, len(codes)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(fetch, code): code for code in codes}
+        for future in as_completed(futures):
+            code = futures[future]
+            try:
+                c, quote = future.result()
+                quotes[_normalize_code(c)] = quote
+            except Exception as exc:
+                quotes[code] = {"error": str(exc)[:120]}
+
+    for item in items:
+        code = _normalize_code(item.get("code", ""))
+        quote = quotes.get(code)
+        if quote:
+            item["quote"] = quote
+            if not item.get("name") and quote.get("name"):
+                item["name"] = quote.get("name")
+
+
+def _format_candidate_table(title: str, items: list[dict]) -> list[str]:
+    lines = [
+        title,
+        "",
+        "| 代码 | 标的 | 现价 | 涨跌幅 | 评分 | 评级 | 方向 |",
+        "|---|---|---:|---:|---:|---|---|",
+    ]
+    if not items:
+        lines.append("| - | 无 | - | - | - | - | - |")
+        return lines
+
+    for item in items:
+        code = item.get("code", "")
+        quote = _quote_for_item(item)
+        name = quote.get("name") or item.get("name") or code
+        price = _fmt_num(quote.get("price"), 2)
+        change_pct = _fmt_pct(quote.get("change_pct"))
+        score = _fmt_num(item.get("stock_skill_score"), 1)
+        rating = item.get("rating_label") or "📌 观察"
+        direction = _direction_for_item(item)
+        lines.append(f"| {code} | {name} | {price} | {change_pct} | {score} | {rating} | {direction} |")
+    return lines
+
+
+def _format_buy_item(item: dict, *, stale_signal: bool = False) -> str:
+    code = item.get("code", "")
+    name = item.get("name") or code
+    signal_bar = item.get("signal_bar") or {}
+    asof_bar = item.get("asof_bar") or {}
+    close = asof_bar.get("close", signal_bar.get("close"))
+    change = _fmt_change_from_bars(item)
+    score = _fmt_num(item.get("stock_skill_score"), 1)
+    rating = item.get("rating_label") or "📌 观察"
+    industry = item.get("stock_industry") or "未识别"
+    concepts = item.get("matched_hot_concepts") or []
+    concept_text = "、".join(concepts[:4]) if concepts else (item.get("matched_hot_industry") or "未命中")
+    ret_text = _fmt_pct(item.get("stock_ret_nd_pct"))
+    fit_reason = item.get("fit_reason") or "trend_pullback"
+    risk_flags = item.get("risk_flags") or []
+
+    title_icon = "⚠️" if stale_signal else "🔥"
+    lines = [
+        f"**{title_icon} {name}({code})** {score}分·{change}·{rating}",
+        f"  长线：{item.get('long_term_action', '观察')} - {industry} / {concept_text}",
+        f"  短线：{item.get('short_term_action', '观察')} - 近{strategy_params.HOT_SECTOR_PULLBACK_RET_DAYS}日{ret_text}，{fit_reason}",
+    ]
+    if asof_bar:
+        if asof_bar.get("exit"):
+            lines.append("  操作：今日已触发 exit，不作为买入候选")
+        elif asof_bar.get("entry"):
+            lines.append("  操作：形态仍有效，按回踩低吸处理，不追高")
+        else:
+            lines.append("  操作：昨日信号仍可观察，但今日不再满足 entry，等下一次回踩确认")
+    else:
+        lines.append("  操作：仅按信号日判断，执行前需复核实时价")
+    if risk_flags:
+        lines.append(f"  风险：{'；'.join(risk_flags[:3])}")
+    return "\n".join(lines)
+
+
+def _format_reduce_item(item: dict) -> str:
+    code = item.get("code", "")
+    name = item.get("name") or code
+    if "error" in item:
+        return f"**⚠️ {name}({code})** 持仓扫描失败\n  风险：{item.get('error')}"
+    signal_bar = item.get("signal_bar") or {}
+    action = item.get("action") or "reduce"
+    pct = item.get("reduce_pct_label") or ""
+    reason = item.get("message") or item.get("reason") or ""
+    close = _fmt_num(signal_bar.get("close"), 2)
+    rsi = _fmt_num(signal_bar.get("rsi"), 1)
+    if action == "clear":
+        action_label = "清仓"
+        long_line = f"  长线：持仓管理 - 触发{action_label}"
+    elif action == "watch":
+        action_label = pct or "过热提示"
+        long_line = f"  长线：持仓管理 - {action_label}"
+    elif action == "skip":
+        long_line = f"  长线：持仓管理 - {item.get('message') or '跳过'}"
+    else:
+        action_label = f"减仓{pct}"
+        long_line = f"  长线：持仓管理 - 触发{action_label}"
+    return "\n".join(
+        [
+            f"**⚠️ {name}({code})** {close}",
+            long_line,
+            f"  短线：{reason}，RSI{rsi}",
+        ]
+    )
+
+
+def _print_human_report(payload: dict, *, holdings: list[str], provider: MarketDataProvider | None = None) -> None:
+    buy = payload.get("buy") or {}
+    buy_prev = buy.get("from_previous_day_close") or []
+    buy_last = buy.get("from_last_close") or []
+    raw_prev = buy.get("from_previous_day_close_raw") or []
+    raw_last = buy.get("from_last_close_raw") or []
+    buy_prev_total = int(buy.get("from_previous_day_close_total") or len(buy_prev))
+    buy_last_total = int(buy.get("from_last_close_total") or len(buy_last))
+    reduce_signals = payload.get("reduce") or []
+    sell_signals = payload.get("sell") or []
+    latest_bar_date = payload.get("latest_bar_date") or "N/A"
+    display_cap = int(payload.get("max_buy_candidates") or 8)
+    display_cap = max(8, display_cap)
+
+    formal_items = buy_last[:display_cap]
+    stale_items = buy_prev[:display_cap]
+    observation_items = raw_last[:display_cap] if not formal_items else []
+    quote_items = formal_items + stale_items + observation_items
+    _attach_realtime_quotes(quote_items, provider)
+
+    print(f"📈 stock_skill · 趋势回踩复盘 · {latest_bar_date}")
+    for line in _format_regime_table(payload):
+        print(line)
+    print()
+    regime = (payload.get("market_regime") or {}).get("from_last_close") or {}
+    allow = bool(regime.get("allow_new_buys"))
+    if allow:
+        print("**结论：大盘开关已放行，可只看正式买入候选。**")
+    else:
+        reasons = ",".join(regime.get("block_reasons") or []) or "market_regime_blocked"
+        print(f"**结论：今天不新开仓，不买。** 拦截原因：`{reasons}`")
+    print()
+    print(_format_hot_line(payload))
+    print(
+        f"**扫描** 成交额池{payload.get('universe_size')}只 · "
+        f"昨日信号{buy_prev_total}只/展示{len(buy_prev)}只 · "
+        f"收盘信号{buy_last_total}只/展示{len(buy_last)}只 · "
+        f"过滤前收盘形态{len(raw_last)}只 · "
+        f"错误{payload.get('errors_total', 0)}只"
+    )
+    print()
+
+    if formal_items:
+        for line in _format_candidate_table("**🔥 收盘买入候选**", formal_items):
+            print(line)
+        print()
+    else:
+        print("**🔥 收盘买入候选**")
+        print("无。收盘信号为空或被大盘环境/热点/成本/鲁棒性过滤拦截。")
+        print()
+
+    if observation_items:
+        for line in _format_candidate_table("**👀 过滤前观察名单，不作为买入清单**", observation_items):
+            print(line)
+        print()
+
+    if stale_items:
+        for line in _format_candidate_table("**👀 昨日信号今日观察**", stale_items):
+            print(line)
+        print()
+    else:
+        print("**👀 昨日信号今日观察**")
+        print("无。")
+        print()
+
+    print("**⚠️ 持仓风控**")
+    if holdings:
+        actionable = reduce_signals or sell_signals
+        if actionable:
+            for item in reduce_signals:
+                print(_format_reduce_item(item))
+                print()
+            reduce_codes = {item.get("code") for item in reduce_signals}
+            for item in sell_signals:
+                if item.get("code") not in reduce_codes:
+                    print(_format_reduce_item({**item, "action": "clear", "reason": item.get("via", "exit")}))
+                    print()
+        else:
+            print("未触发减仓/清仓。")
+    else:
+        print("未传 --holdings / --paper-account，未扫描持仓减仓和清仓。")
+    print()
+
+    print(
+        f"⚠️ 仅供策略复盘参考，不自动下单。回复或运行 `python3 trend_strategy/scripts/daily_decisions.py --json` 查看完整结构化数据。"
+    )
 
 
 def main() -> None:
@@ -295,12 +788,12 @@ def main() -> None:
         "--hot-sector-pool-n",
         type=int,
         default=strategy_params.HOT_SECTOR_MATCH_POOL_N_DEFAULT,
-        help="Industry/concept match pool size by weekly change (default 30, both required)",
+        help="Industry/concept match pool size by weekly change (default 50, either may match)",
     )
     parser.add_argument(
         "--disable-market-regime-check",
         action="store_true",
-        help="Disable index regime gate (HS300+ZZ1000 above ma_20 and RSI floor)",
+        help="Disable index regime gate (HS300+ZZ1000 RSI floor)",
     )
     args = parser.parse_args()
 
@@ -308,11 +801,15 @@ def main() -> None:
     paper_engine = None
     paper_db_path = None
     paper_codes: list[str] = []
+    paper_positions_by_code: dict[str, dict] = {}
     if args.paper_account:
         try:
             paper_engine, paper_db_path = _import_simulated_engine(args.db_path)
             positions = paper_engine.get_positions(args.paper_account)
-            paper_codes = [_normalize_code(item["symbol"]) for item in positions if int(item.get("qty") or 0) > 0]
+            paper_positions_by_code = {
+                _normalize_code(item["symbol"]): item for item in positions if int(item.get("qty") or 0) > 0
+            }
+            paper_codes = list(paper_positions_by_code.keys())
         except Exception as exc:
             print(f"ERROR: paper account load failed: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -448,8 +945,12 @@ def main() -> None:
             bool(market_regime_last.get("allow_new_buys")) if market_regime_check_active else True
         )
 
+    _score_buy_items(buy_prev_raw, use_previous_day=True)
+    _score_buy_items(buy_last_raw, use_previous_day=False)
+
     def _passes_buy_filters(item: dict, *, use_previous_day: bool) -> bool:
         ok = bool(item.get("cost_filter_passed")) and bool(item.get("consensus_filter_passed"))
+        ok = ok and bool(item.get("style_filter_passed", True))
         if hot_filter_active:
             ok = ok and bool(item.get("hot_sector_filter_passed"))
         if market_regime_check_active:
@@ -462,8 +963,8 @@ def main() -> None:
     buy_prev = [x for x in buy_prev_raw if _passes_buy_filters(x, use_previous_day=True)]
     buy_last = [x for x in buy_last_raw if _passes_buy_filters(x, use_previous_day=False)]
 
-    buy_prev.sort(key=lambda x: float(x["signal_bar"]["score"]), reverse=True)
-    buy_last.sort(key=lambda x: float(x["signal_bar"]["score"]), reverse=True)
+    buy_prev.sort(key=lambda x: (float(x.get("stock_skill_score") or 0.0), float(x["signal_bar"]["score"])), reverse=True)
+    buy_last.sort(key=lambda x: (float(x.get("stock_skill_score") or 0.0), float(x["signal_bar"]["score"])), reverse=True)
 
     cap = int(args.max_buys)
     if cap > 0:
@@ -480,6 +981,7 @@ def main() -> None:
     sell_signals: list[dict] = []
     reduce_signals: list[dict] = []
     for code in holdings:
+        paper_position = paper_positions_by_code.get(code)
         position_state = empty_reduce_state()
         if paper_engine is not None and args.paper_account:
             try:
@@ -505,7 +1007,26 @@ def main() -> None:
                 continue
             mgmt = enrich_position_management(df, reduce_params)
             row = mgmt.iloc[-1]
-            reduce_sig = evaluate_reduce_signal(row, position_state, reduce_params)
+            holding_trading_days = None
+            avg_cost = None
+            peak_close = None
+            if paper_position:
+                buy_date = paper_position.get("latest_acquired_date") or paper_position.get("first_acquired_date")
+                holding_trading_days = _holding_trading_days(
+                    mgmt,
+                    buy_date,
+                    row["time"],
+                )
+                peak_close = _peak_close_since(mgmt, buy_date, row["time"])
+                avg_cost = float(paper_position.get("avg_cost") or 0.0)
+            reduce_sig = evaluate_reduce_signal(
+                row,
+                position_state,
+                reduce_params,
+                holding_trading_days=holding_trading_days,
+                avg_cost=avg_cost,
+                peak_close=peak_close,
+            )
             exit_enriched = trend_pullback(df, strategy_params.TREND_PULLBACK_PARAMS)
             last = _row_snapshot(exit_enriched, len(exit_enriched) - 1)
         except Exception as exc:
@@ -525,7 +1046,7 @@ def main() -> None:
                 "state_before": dict(position_state),
                 **reduce_sig,
             }
-            if apply_reduce_state and paper_engine is not None and args.paper_account:
+            if reduce_sig.get("state_flag") and apply_reduce_state and paper_engine is not None and args.paper_account:
                 try:
                     item["state_after"] = paper_engine.mark_position_strategy_reduce(
                         args.paper_account,
@@ -585,14 +1106,36 @@ def main() -> None:
             "no_add_to_existing_holdings": strategy_params.BUY_POLICY_NO_ADD_TO_HOLDINGS,
             "note": "已有持仓不出买入信号，仅输出减仓/清仓",
         },
+        "style_filter": {
+            "industry_blacklist": strategy_params.INDUSTRY_BLACKLIST,
+            "require_min_stock_concepts": strategy_params.REQUIRE_MIN_STOCK_CONCEPTS,
+            "note": "行业命中黑名单或概念标签不足则剔除",
+        },
+        "scoring_policy": {
+            "name": "stock_skill_score",
+            "scale": "0-100",
+            "note": "参考 BigA 展示方式，但仅评价 trend_pullback 策略信号强弱，不包含基本面催化总分",
+            "weights": strategy_params.SIGNAL_SCORE_WEIGHTS,
+            "rating_thresholds": [
+                {"min": 80, "label": "🔥 强买候选"},
+                {"min": 70, "label": "🔥 买入候选"},
+                {"min": 60, "label": "👀 观察低吸"},
+                {"min": 50, "label": "📌 观察"},
+                {"min": 40, "label": "⚠️ 谨慎"},
+                {"min": 0, "label": "🛑 回避"},
+            ],
+        },
         "reduce_policy": {
             "basis": "remaining_position",
-            "note": "各档减仓比例按触发时剩余仓位计算，非初始总仓位",
+            "mode": "dual: trend/swing",
+            "note": "趋势模式MA5/MA10只提示风险；波段模式会对破MA10、盈利后破MA5、盈利后高点回撤和极热放量阴线执行减仓/清仓",
+            "early_hold_protection": "买入后前3个交易日触发ma_5/ma_10时只提示减仓风险；ma_20清仓和-8%硬止损保留",
             "example_sequence": [
-                "RSI过热减1/3 → 剩2/3",
-                "破ma_5再减1/3 → 约剩4/9",
-                "破ma_10减1/2 → 约剩2/9",
-                "破ma_20清仓",
+                "先按20日涨幅、MA20斜率、量能比判断trend/swing",
+                "trend: MA5/MA10/RSI过热 → 风险提示，不强制减仓",
+                "swing: 破MA10 → 清仓",
+                "swing: 盈利15%后破MA5，或盈利20%后从高点回撤8% → 减半",
+                "任一模式: 破MA20或-8%硬止损 → 清仓",
             ],
         },
         "params": strategy_params.TREND_PULLBACK_PARAMS,
@@ -631,92 +1174,7 @@ def main() -> None:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 
-    print("strategy", payload["strategy"])
-    print("latest_bar_date", latest_bar_date)
-    print("universe_size", len(universe))
-    if cap > 0:
-        print("max_buy_candidates", cap, "shown", len(buy_prev_out), "/", len(buy_prev), "and", len(buy_last_out), "/", len(buy_last))
-    print()
-    print("=== 买入参考：上一交易日收盘出现 entry（适合与 T-1 信号、当日执行对齐）===")
-    for item in buy_prev_out:
-        sb = item["signal_bar"]
-        print(
-            item["code"],
-            item.get("name", ""),
-            "score",
-            sb["score"],
-            "rsi",
-            sb["rsi"],
-            "date",
-            sb["date"],
-        )
-    if not buy_prev_out:
-        print("(无)")
-    print()
-    print("=== 买入参考：最新一根日线收盘也出现 entry（形态展示，注意与 T-1 语义不同）===")
-    for item in buy_last_out:
-        sb = item["signal_bar"]
-        print(
-            item["code"],
-            item.get("name", ""),
-            "score",
-            sb["score"],
-            "rsi",
-            sb["rsi"],
-            "date",
-            sb["date"],
-        )
-    if not buy_last_out:
-        print("(无)")
-    print()
-    print("=== 减仓参考：持仓且最新收盘触发分档减仓（需 --paper-account 才持久化状态）===")
-    if holdings:
-        for item in reduce_signals:
-            if "error" in item:
-                print(item["code"], "error", item["error"])
-            else:
-                sb = item["signal_bar"]
-                print(
-                    item["code"],
-                    item.get("name", ""),
-                    item.get("action"),
-                    item.get("reduce_pct_label"),
-                    item.get("reason"),
-                    "date",
-                    sb["date"],
-                    "close",
-                    sb["close"],
-                    "rsi",
-                    sb.get("rsi"),
-                    "state_applied",
-                    item.get("state_applied"),
-                )
-        if not reduce_signals:
-            print("(无)")
-    else:
-        print("未传 --holdings / --paper-account，跳过持仓减仓扫描")
-    print()
-    print("=== 卖出参考：持仓且最新收盘满足 exit / 减仓清仓 ===")
-    if args.holdings:
-        for item in sell_signals:
-            if "error" in item:
-                print(item["code"], "error", item["error"])
-            else:
-                sb = item["signal_bar"]
-                print(
-                    item["code"],
-                    item.get("name", ""),
-                    "exit_date",
-                    sb["date"],
-                    "close",
-                    sb["close"],
-                    "rsi",
-                    sb["rsi"],
-                )
-        if not sell_signals:
-            print("(无)")
-    else:
-        print("未传 --holdings / --paper-account，跳过持仓卖出扫描")
+    _print_human_report(payload, holdings=holdings, provider=provider)
 
 
 if __name__ == "__main__":

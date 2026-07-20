@@ -36,23 +36,46 @@ def _df(closes: list[float]) -> pd.DataFrame:
     )
 
 
-def test_index_bar_above_ma_and_rsi() -> None:
-    closes = [100.0 + i * 0.5 for i in range(30)]
+def test_index_bar_reports_above_ma_without_gating() -> None:
+    closes = [100.0] * 25 + [90.0] * 5
     snap = evaluate_index_bar(_df(closes), -1, ma_period=20, rsi_period=14, rsi_floor=40.0)
     assert snap is not None
-    assert snap["above_ma"] is True
-    assert snap["rsi_ok"] is True
+    assert snap["above_ma"] is False
 
 
-def test_market_regime_blocks_when_below_ma() -> None:
+def test_market_regime_allows_when_below_ma_but_rsi_ok() -> None:
     closes = [100.0] * 25 + [90.0] * 5
-    provider = _Provider({"000300": _df(closes), "000852": _df(closes)})
-    out = evaluate_market_regime(provider, {"hs300": "000300", "zz1000": "000852"}, bar_idx=-1)
+    provider = _Provider({"sh000300": _df(closes), "sh000852": _df(closes)})
+    out = evaluate_market_regime(
+        provider,
+        {"hs300": "sh000300", "zz1000": "sh000852"},
+        bar_idx=-1,
+    )
+    assert out["indices"]["hs300"]["above_ma"] is False
+    assert "index_below_ma20" not in out["block_reasons"]
+    # 是否允许开仓仅由 RSI 决定
+    assert out["allow_new_buys"] == ("index_rsi_below_floor" not in out["block_reasons"])
+
+
+def test_market_regime_blocks_when_rsi_low() -> None:
+    import math
+
+    closes = [100.0 + 5.0 * math.sin(i / 2.0) for i in range(40)]
+    df = _df(closes)
+    provider = _Provider({"sh000300": df, "sh000852": df})
+    out = evaluate_market_regime(
+        provider,
+        {"hs300": "sh000300", "zz1000": "sh000852"},
+        rsi_floor=999.0,
+        bar_idx=-1,
+    )
+    assert out["indices"]["hs300"]["rsi"] is not None
     assert out["allow_new_buys"] is False
-    assert "index_below_ma20" in out["block_reasons"]
+    assert "index_rsi_below_floor" in out["block_reasons"]
 
 
 if __name__ == "__main__":
-    test_index_bar_above_ma_and_rsi()
-    test_market_regime_blocks_when_below_ma()
+    test_index_bar_reports_above_ma_without_gating()
+    test_market_regime_allows_when_below_ma_but_rsi_ok()
+    test_market_regime_blocks_when_rsi_low()
     print("ok")

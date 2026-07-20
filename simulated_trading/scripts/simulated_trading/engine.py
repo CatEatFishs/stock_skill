@@ -442,13 +442,19 @@ class PaperTradingEngine:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT symbol, SUM(remaining_qty) AS qty, SUM(remaining_qty * cost_price) AS cost_amount
+                SELECT
+                    symbol,
+                    SUM(remaining_qty) AS qty,
+                    SUM(remaining_qty * cost_price) AS cost_amount,
+                    MIN(acquired_date) AS first_acquired_date,
+                    MAX(acquired_date) AS latest_acquired_date,
+                    SUM(CASE WHEN acquired_date = ? THEN remaining_qty ELSE 0 END) AS today_buy_qty
                 FROM position_lots
                 WHERE account_id = ? AND remaining_qty > 0
                 GROUP BY symbol
                 ORDER BY symbol
                 """,
-                (account_id,),
+                (trade_date(), account_id),
             ).fetchall()
             symbols = [row["symbol"] for row in rows]
             quotes = self.market_data.get_quotes(symbols) if symbols else {}
@@ -466,6 +472,10 @@ class PaperTradingEngine:
                         "qty": qty,
                         "sellable_qty": self._get_sellable_qty(conn, account_id, row["symbol"]),
                         "avg_cost": round(avg_cost, 4),
+                        "first_acquired_date": row["first_acquired_date"],
+                        "latest_acquired_date": row["latest_acquired_date"],
+                        "today_buy_qty": int(row["today_buy_qty"] or 0),
+                        "has_today_buy": int(row["today_buy_qty"] or 0) > 0,
                         "last_price": round(last_price, 4),
                         "market_value": round(market_value, 2),
                         "unrealized_pnl": round(market_value - cost_amount, 2),
