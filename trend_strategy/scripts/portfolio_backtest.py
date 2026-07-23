@@ -236,6 +236,7 @@ def _market_regime_on_day(
     ma_period: int,
     rsi_period: int,
     rsi_floor: float,
+    rsi_mode: str = "any",
 ) -> dict[str, Any]:
     class _IdxProvider:
         def get_history(self, symbol: str, count: int = 60) -> pd.DataFrame:
@@ -252,6 +253,7 @@ def _market_regime_on_day(
         ma_period=ma_period,
         rsi_period=rsi_period,
         rsi_floor=rsi_floor,
+        rsi_mode=rsi_mode,
         bar_idx=-1,
     )
 
@@ -517,6 +519,7 @@ def run_backtest(args: argparse.Namespace) -> dict[str, Any]:
                 ma_period=strategy_params.MARKET_REGIME_MA_PERIOD,
                 rsi_period=strategy_params.MARKET_REGIME_RSI_PERIOD,
                 rsi_floor=strategy_params.MARKET_REGIME_RSI_FLOOR,
+                rsi_mode=strategy_params.MARKET_REGIME_RSI_MODE,
             )
             pending_buys = _scan_buy_candidates(
                 universe,

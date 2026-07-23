@@ -436,9 +436,11 @@ def _format_hot_line(payload: dict) -> str:
 def _format_regime_table(payload: dict) -> list[str]:
     regime = (payload.get("market_regime") or {}).get("from_last_close") or {}
     indices = regime.get("indices") or {}
-    floor = regime.get("rsi_floor", 40)
+    floor = regime.get("rsi_floor", 35)
+    mode = regime.get("rsi_mode", "any")
+    mode_label = "任一过线即可" if mode == "any" else "须全部过线"
     lines = [
-        "**大盘新开仓开关**",
+        f"**大盘新开仓开关**（{mode_label}，RSI≥{_fmt_num(floor, 0)}）",
         "",
         "| 指数 | RSI | 策略要求 | 结论 |",
         "|---|---:|---:|---|",
@@ -448,6 +450,9 @@ def _format_regime_table(payload: dict) -> list[str]:
         rsi = _fmt_num(idx.get("rsi"), 2)
         verdict = "✅ 达标" if idx.get("rsi_ok") else "❌ 不达标"
         lines.append(f"| {_index_label(key)} | {rsi} | ≥ {_fmt_num(floor, 0)} | {verdict} |")
+    overall = "✅ 允许新开仓" if regime.get("allow_new_buys") else "❌ 暂停新开仓"
+    lines.append("")
+    lines.append(f"综合：{overall}")
     return lines
 
 
@@ -793,7 +798,7 @@ def main() -> None:
     parser.add_argument(
         "--disable-market-regime-check",
         action="store_true",
-        help="Disable index regime gate (HS300+ZZ1000 RSI floor)",
+        help="Disable index regime gate (HS300/ZZ1000 RSI floor, any-one mode)",
     )
     args = parser.parse_args()
 
@@ -902,6 +907,7 @@ def main() -> None:
         ma_period=strategy_params.MARKET_REGIME_MA_PERIOD,
         rsi_period=strategy_params.MARKET_REGIME_RSI_PERIOD,
         rsi_floor=strategy_params.MARKET_REGIME_RSI_FLOOR,
+        rsi_mode=strategy_params.MARKET_REGIME_RSI_MODE,
         bar_idx=-2,
     )
     market_regime_last = evaluate_market_regime(
@@ -911,6 +917,7 @@ def main() -> None:
         ma_period=strategy_params.MARKET_REGIME_MA_PERIOD,
         rsi_period=strategy_params.MARKET_REGIME_RSI_PERIOD,
         rsi_floor=strategy_params.MARKET_REGIME_RSI_FLOOR,
+        rsi_mode=strategy_params.MARKET_REGIME_RSI_MODE,
         bar_idx=-1,
     )
     market_regime_check_active = not bool(args.disable_market_regime_check)

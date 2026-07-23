@@ -59,7 +59,8 @@ description: A 股全市场高流动性池内按趋势回踩（trend_pullback）
 | `entry_consensus_min` | 0.67 | 买入鲁棒性过滤 |
 | `hot_sector_top_n` / `hot_sector_pool_n` | 10 / 50 | 展示 Top10；匹配池 Top50（行业或概念任一命中） |
 | `hot_sector_pullback_ret_days` | 5 | 个股近 N 日涨幅与板块周涨幅比较 |
-| `market_regime_rsi_floor` | 40 | 指数 RSI 低于此值暂停新开仓 |
+| `market_regime_rsi_floor` | 35 | 指数 RSI 门槛；配合 `rsi_mode=any` 任一过线即可新开仓 |
+| `market_regime_rsi_mode` | any | `any`=沪深300/中证1000 任一 RSI≥floor；`all`=须全部过线 |
 | `industry_blacklist` | 银行 | 行业黑名单，命中即剔除（含包含匹配） |
 | `require_min_stock_concepts` | 1 | 个股至少命中的概念标签数 |
 | `max_buy_candidates` | 5 | 买入列表默认截断条数 |
@@ -84,10 +85,12 @@ description: A 股全市场高流动性池内按趋势回踩（trend_pullback）
 **第 5 条：大盘环境（买入侧开关）**
 
 - 指数：**沪深300**（`sh000300`）、**中证1000**（`sh000852`）
-- **允许新开仓**须同时满足（与信号 K 线对齐：T-1 列表用倒数第 2 根指数 bar，最新列表用倒数第 1 根）：
-  - 两指数 `RSI_14` 均 **≥ 40**（任一低于 40 → 暂停买入，仅处理持仓减仓/清仓）
+- **允许新开仓**（与信号 K 线对齐：T-1 列表用倒数第 2 根指数 bar，最新列表用倒数第 1 根）：
+  - 默认 `rsi_mode=any`：两指数 `RSI_14` **任一 ≥ 35** 即可新开仓
+  - 可选 `rsi_mode=all`：须两指数均 ≥ floor（旧口径）
+  - 两指数均低于门槛 → 暂停买入，仅处理持仓减仓/清仓
 - 指数相对 `ma_20` 位置仅作 JSON 参考（`indices.*.above_ma`），**不再**作为买入拦截条件
-- JSON 字段：`market_regime.from_previous_day_close` / `from_last_close`
+- JSON 字段：`market_regime.from_previous_day_close` / `from_last_close`（含 `rsi_floor`、`rsi_mode`）
 - `--disable-market-regime-check` 可关闭（调试用）
 
 **第 6 条：热门板块（买入侧过滤）**
@@ -131,7 +134,7 @@ description: A 股全市场高流动性池内按趋势回踩（trend_pullback）
 | 成本空间 | 15 | `edge_after_cost` 扣除往返成本后的空间 |
 | 热门板块 | 15 | 行业/概念命中、板块内回踩、相对板块弱/贴近均线 |
 | 风格过滤 | 5 | 行业黑名单与题材标签要求 |
-| 大盘环境 | 5 | 沪深300 + 中证1000 RSI 开仓开关 |
+| 大盘环境 | 5 | 沪深300 / 中证1000 RSI 开仓开关（任一≥35） |
 | MACD 动能 | 5 | DIF > DEA 且柱放大 |
 
 评级标签：
@@ -156,7 +159,7 @@ description: A 股全市场高流动性池内按趋势回踩（trend_pullback）
 
 ### 买入附加过滤（仅买入侧）
 
-1. **大盘环境**：沪深300 + 中证1000 的 RSI ≥ 40
+1. **大盘环境**：沪深300 / 中证1000 的 RSI 任一 ≥ 35（`rsi_mode=any`）
 2. **热门板块**：行业或概念任一命中 Top50 池 + 板块内回踩（见上）
 3. **风格过滤**：行业不在黑名单，且概念标签数 ≥ 1
 4. **不加仓**：排除已有持仓标的

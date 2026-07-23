@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
 from .indicators import add_ma, add_rsi
+
+RsiMode = Literal["any", "all"]
 
 
 def evaluate_index_bar(
@@ -15,7 +17,7 @@ def evaluate_index_bar(
     *,
     ma_period: int,
     rsi_period: int,
-    rsi_floor: float = 40.0,
+    rsi_floor: float = 35.0,
 ) -> dict[str, Any] | None:
     if df is None or df.empty:
         return None
@@ -49,14 +51,21 @@ def evaluate_market_regime(
     history_count: int = 60,
     ma_period: int = 20,
     rsi_period: int = 14,
-    rsi_floor: float = 40.0,
+    rsi_floor: float = 35.0,
+    rsi_mode: RsiMode = "any",
     bar_idx: int = -1,
 ) -> dict[str, Any]:
     """Return regime snapshot for buy gating.
 
-    allow_new_buys when no configured index RSI is below rsi_floor on the evaluation bar.
+    allow_new_buys when index RSI passes rsi_floor on the evaluation bar:
+    - rsi_mode="any": at least one configured index RSI >= rsi_floor
+    - rsi_mode="all": every configured index RSI >= rsi_floor
+
     Index MA (e.g. ma_20) is reported in indices.*.above_ma for reference only, not gating.
     """
+    if rsi_mode not in ("any", "all"):
+        raise ValueError(f"rsi_mode must be 'any' or 'all', got {rsi_mode!r}")
+
     indices: dict[str, Any] = {}
     errors: list[str] = []
 
@@ -82,13 +91,21 @@ def evaluate_market_regime(
             indices[name] = {"code": code, "error": str(exc)[:200]}
 
     valid = [v for v in indices.values() if "error" not in v]
-    all_rsi_ok = bool(valid) and all(bool(v.get("rsi_ok")) for v in valid)
-    allow_new_buys = all_rsi_ok and not errors
+    if not valid:
+        rsi_pass = False
+    elif rsi_mode == "any":
+        rsi_pass = any(bool(v.get("rsi_ok")) for v in valid)
+    else:
+        rsi_pass = all(bool(v.get("rsi_ok")) for v in valid)
+
+    # With "any" mode, one healthy index is enough even if another index fails to load.
+    # With "all" mode, any data error still blocks (cannot confirm every index).
+    allow_new_buys = bool(rsi_pass) and (rsi_mode == "any" or not errors)
 
     block_reasons: list[str] = []
-    if not all_rsi_ok:
+    if not rsi_pass:
         block_reasons.append("index_rsi_below_floor")
-    if errors:
+    if errors and (rsi_mode == "all" or not valid):
         block_reasons.append("index_data_error")
 
     return {
@@ -96,6 +113,7 @@ def evaluate_market_regime(
         "ma_period": ma_period,
         "rsi_period": rsi_period,
         "rsi_floor": rsi_floor,
+        "rsi_mode": rsi_mode,
         "bar_idx": bar_idx,
         "indices": indices,
         "block_reasons": block_reasons,

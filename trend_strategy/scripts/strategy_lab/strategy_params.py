@@ -52,7 +52,7 @@ TODO_CONFIRM_ITEMS = [
     "已确认口径: MACD动能(DIF>DEA且柱放大)为排序加分项, 非入场必要条件",
     "已确认口径: 减仓状态写入模拟盘库 position_strategy_state 表",
     "已确认口径: 入场需行业或概念任一命中近一周涨幅Top50, 且个股5日涨幅<板块周涨幅或贴近ma_8",
-    "已确认口径: 大盘环境=沪深300与中证1000 RSI>=40才允许新开仓(不再要求指数>ma_20)",
+    "已确认口径: 大盘环境=沪深300与中证1000 RSI_14 任一>=35即允许新开仓(不再要求两指数同时过线, 不再要求指数>ma_20)",
     "已确认口径: 已有持仓不出买入信号, 仅减仓/清仓; 各档按剩余仓位比例减仓",
     "已确认口径: 风格过滤=行业黑名单(银行)剔除, 行业缺失时概念命中黑名单也剔除, 且要求至少1个概念标签",
 ]
@@ -84,7 +84,9 @@ MARKET_REGIME_INDEX_CODES = {
 }
 MARKET_REGIME_MA_PERIOD = 20
 MARKET_REGIME_RSI_PERIOD = 14
-MARKET_REGIME_RSI_FLOOR = 40.0
+MARKET_REGIME_RSI_FLOOR = 35.0
+# any: 任一指数 RSI>=floor 即可新开仓; all: 全部指数均需过线
+MARKET_REGIME_RSI_MODE = "any"
 
 BUY_POLICY_NO_ADD_TO_HOLDINGS = True
 REDUCE_BASIS_REMAINING_POSITION = True
